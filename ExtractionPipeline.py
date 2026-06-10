@@ -42,10 +42,10 @@ class HDEPICExtractionPipeline:
         with open(self.assoc_annotation_json_path, "r") as f:
             self.assocs_annotations = json.load(f)
 
-    def extract_frames(self, participant_id, video_name, output_folder, resize_to=None, dry_run=False):
+    def extract_frames(self, participant_id, video_name, output_folder, resize_to=None, dry_run=False, force_reextract=False):
         
         print(f"Extracting frames from video: {video_name}")
-
+        
         os.makedirs(output_folder, exist_ok=True)
 
         video_path = os.path.join(VIDEOS_DIR, participant_id, f"{video_name}.mp4")
@@ -53,6 +53,12 @@ class HDEPICExtractionPipeline:
 
         if not cap.isOpened():
             raise Exception(f"Could not open video: {video_path}")
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if not force_reextract and self._all_frames_extracted(output_folder, total_frames):
+            print(f"All {total_frames} frames already extracted for video: {video_name}")
+            cap.release()
+            return
 
         frame_idx = 0
         saved_idx = 0
@@ -86,12 +92,22 @@ class HDEPICExtractionPipeline:
                 saved_idx += 1
                 frame_idx += 1
 
-                print(f"Processed frame {frame_idx}, saved {saved_idx} frames.", end="\r")
+                print(f"Processed frame {frame_idx}", end="\r")
 
         cap.release()
 
         print(f"Finished extracting frames for video: {video_name}")
         print(f"Saved {saved_idx} frames to: {output_folder}")
+
+    def _all_frames_extracted(self, output_folder, total_frames):
+        if total_frames <= 0:
+            return False
+
+        existing_frames = [f for f in os.listdir(output_folder) if f.endswith(".png")]
+        
+        print(f"Found {len(existing_frames)} existing frames in {output_folder}, total frames in video: {total_frames}")
+        return len(existing_frames) >= total_frames    
+        
             
     def extract_video_masks(self, video_name, video_frames_dir, masks_output_dir, dry_run=False):
         print(f"Extracting masks for video: {video_name}")
@@ -100,7 +116,6 @@ class HDEPICExtractionPipeline:
         video_masks = self.masks_annotations[video_name]
         video_attached_masks_dir = os.path.join(self.attached_masks_dir, video_name)
         video_unattached_masks_dir = os.path.join(self.unattached_masks_dir, video_name)
-
 
         with ThreadPoolExecutor(max_workers=8) as executor:
             for association_id, association_details in video_associations.items():
@@ -130,6 +145,9 @@ class HDEPICExtractionPipeline:
 
                         if not dry_run:
                             save_path = os.path.join(association_output_dir, f"{frame_num}.png")
+                            if os.path.exists(save_path):
+                                print(f"Mask for frame {frame_num} already exists at {save_path}, skipping.")
+                                continue
                             a = alpha.copy()
                             future = executor.submit(self._save_rgba_alpha, a, save_path, (a.shape[1], a.shape[0]))
                             future.add_done_callback(
@@ -158,6 +176,7 @@ if __name__ == "__main__":
 
     # for testing
     DRY_RUN = False
+    FORCE_REEXTRACT = False
     PARTICIPANT_ID = "P01"
     VIDEO_NAME = "P01-20240202-110250"
 
@@ -167,6 +186,6 @@ if __name__ == "__main__":
     frames_output_dir = os.path.join(output_dir, "images")
     masks_output_dir = os.path.join(output_dir)
     
-    pipeline.extract_frames(PARTICIPANT_ID, VIDEO_NAME, frames_output_dir, dry_run=DRY_RUN)
+    pipeline.extract_frames(PARTICIPANT_ID, VIDEO_NAME, frames_output_dir, dry_run=DRY_RUN, force_reextract=FORCE_REEXTRACT)
     pipeline.extract_video_masks(VIDEO_NAME, frames_output_dir, masks_output_dir, dry_run=DRY_RUN)
 
