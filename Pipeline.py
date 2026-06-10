@@ -15,6 +15,8 @@ class HDEPICPipeline:
             print(f"Reconstruction for video {video_name} already complete, skipping pipeline execution.")
             return True
         
+        print(f"Running pipeline for video {video_name}...")
+
         # Step 1: Extract frames and masks
         if not skip_step_1:
             self.extraction_pipeline.extract_frames(participant_id, video_name, frames_output_folder, resize_to=resize_to, dry_run=dry_run)
@@ -39,7 +41,7 @@ class HDEPICPipeline:
 if __name__ == "__main__":
     
     # for testing
-    DRY_RUN = False
+    DRY_RUN = True
     PARTICIPANT_ID = "P01"
     VIDEO_NAME = "P01-20240202-110250"
     FRAMES_MASKS_DIR = "./extracted_frames_and_masks"
@@ -55,6 +57,7 @@ if __name__ == "__main__":
     video_frames_output_dir = os.path.join(video_output_dir, "images")
     video_masks_output_dir = os.path.join(video_output_dir)
     
+    print("Starting pipeline execution...")
     pipeline = HDEPICPipeline(MASKS_ANNOTATIONS_JSON_PATH, ASSOC_ANNOTATIONS_JSON_PATH, ATTACHED_MASKS_DIR, UNATTACHED_MASKS_DIR)
     pipeline.run_pipeline(PARTICIPANT_ID, VIDEO_NAME, video_frames_output_dir, video_masks_output_dir, dry_run=DRY_RUN, skip_step_1=True)
 
