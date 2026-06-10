@@ -41,6 +41,11 @@ class HDEPIC3DReconstructionPipeline:
         print(f"Using mask prompts: {mask_prompts}")
 
         for single_mask_prompt in mask_prompts:
+            # skip if the mask prompt contains the word "skipped"
+            if "skipped" in single_mask_prompt:
+                print(f"Skipping mask prompt {single_mask_prompt} for video {video_name} because it contains the word 'skipped'.")
+                continue
+
             image_names = None
             model_tag = "hf"
 
@@ -92,6 +97,11 @@ class HDEPIC3DReconstructionPipeline:
 
             image_names = parse_image_names(image_names)
 
+            # check if reconstruction for this object already exists, and if so skip it (this allows us to run the pipeline multiple times without re-reconstructing objects we've already done, in case of crashes or if we want to add more objects later)
+            if self._check_object_reconstruction_complete(video_name, single_mask_prompt):
+                print(f"Reconstruction for object {single_mask_prompt} in video {video_name} already exists, skipping.")
+                continue
+
             try:
                 logger.info(f"Single-object mode: {single_mask_prompt}")
                 run_weighted_inference(
@@ -142,6 +152,26 @@ class HDEPIC3DReconstructionPipeline:
                 return None
             
         return True
+
+    def _check_object_reconstruction_complete(self, video_name, mask_prompt):
+        object_viz_dir = Path(__file__).parent / "visualization" / video_name / mask_prompt
+
+        if not object_viz_dir.exists():
+            print(f"Object visualization directory does not exist: {object_viz_dir}")
+            return False
+
+        for run_dir in object_viz_dir.iterdir():
+            if not run_dir.is_dir():
+                continue
+
+            has_mesh = (run_dir / "result.glb").exists()
+            has_params = (run_dir / "params.npz").exists()
+            if has_mesh and has_params:
+                print(f"Found complete reconstruction for object {mask_prompt} in video {video_name} at {run_dir}, skipping reconstruction for this object.")
+                return True
+
+        print(f"No complete reconstruction found for object {mask_prompt} in video {video_name}, will reconstruct.")
+        return False
 
 if __name__ == "__main__":
     

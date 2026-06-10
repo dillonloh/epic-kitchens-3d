@@ -11,10 +11,6 @@ class HDEPICPipeline:
 
     def run_pipeline(self, participant_id, video_name, frames_output_folder, masks_output_dir, resize_to=None, dry_run=False, skip_step_1=False):
         
-        if self._check_reconstruction_complete(video_name):
-            print(f"Reconstruction for video {video_name} already complete, skipping pipeline execution.")
-            return True
-        
         print(f"Running pipeline for video {video_name}...")
 
         # Step 1: Extract frames and masks
@@ -25,17 +21,9 @@ class HDEPICPipeline:
         # Step 2: Reconstruct 3D from extracted frames and masks
         self.reconstruction_pipeline.reconstruct_3d(video_name, masks_output_dir, resize_to=resize_to, dry_run=dry_run)
 
-        return True
-    
-    def _check_reconstruction_complete(self, video_name):
-        viz_base_dir = os.path.join(Path(__file__).parent, "visualization") # the viz dir should be in the same 'pipeline' dir as this file
-        participant_viz_dir = os.path.join(viz_base_dir, video_name)
+        print(f"Pipeline execution for video {video_name} completed.")
 
-        # check if participant viz dir is non-empty
-        # TODO: this doesnt guarantee that ALL reconstructions for all objects are done, just that there exists some reconstructions
-        if os.path.exists(participant_viz_dir) and os.listdir(participant_viz_dir):
-            return True
-        return False
+        return True
 
 
 if __name__ == "__main__":
@@ -59,6 +47,6 @@ if __name__ == "__main__":
     
     print("Starting pipeline execution...")
     pipeline = HDEPICPipeline(MASKS_ANNOTATIONS_JSON_PATH, ASSOC_ANNOTATIONS_JSON_PATH, ATTACHED_MASKS_DIR, UNATTACHED_MASKS_DIR)
-    pipeline.run_pipeline(PARTICIPANT_ID, VIDEO_NAME, video_frames_output_dir, video_masks_output_dir, dry_run=DRY_RUN, skip_step_1=True)
+    pipeline.run_pipeline(PARTICIPANT_ID, VIDEO_NAME, video_frames_output_dir, video_masks_output_dir, dry_run=DRY_RUN, skip_step_1=False)
 
     print("Pipeline execution completed.")
