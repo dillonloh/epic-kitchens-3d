@@ -1,6 +1,7 @@
 import os
 import shutil
 from pathlib import Path
+from typing import List
 
 from ExtractionPipeline import HDEPICExtractionPipeline
 from ReconstructionPipeline import HDEPIC3DReconstructionPipeline
@@ -36,9 +37,9 @@ class HDEPICPipeline:
             try:
                 print(f"Cleaning up extracted frames and masks for video {video_name}...")
                 # remove extracted frames
-                shutil.rmtree(frames_output_folder)
+                shutil.rmtree(frames_output_folder, ignore_errors=True)
                 # remove extracted masks
-                shutil.rmtree(masks_output_dir)
+                shutil.rmtree(masks_output_dir, ignore_errors=True)
 
                 with open(self.reconstruction_tracking_log, "a") as log_file:
                     log_file.write(f"{video_name}\n")
@@ -59,8 +60,12 @@ class HDEPICPipeline:
                 if video_name in reconstructed_videos:
                     print(f"Video {video_name} already reconstructed, skipping...")
                     return True
-                
-        mask_prompts = self._get_all_mask_prompts(os.path.join("./extracted_frames_and_masks", video_name))
+
+        mask_prompts = self._get_all_mask_prompts(video_name)
+
+        if not mask_prompts:
+            print(f"No mask prompts found in annotations for video {video_name}.")
+            return False
 
         for mask_prompt in mask_prompts:
             if not self._check_object_reconstruction_complete(video_name, mask_prompt):
@@ -69,20 +74,19 @@ class HDEPICPipeline:
         
         print(f"Reconstruction for video {video_name} is already complete, skipping reconstruction.")
         return True
-    
-    def _get_all_mask_prompts(self, input_dir):
-        print(f"Getting all mask prompts from input directory: {input_dir}")
-        mask_prompts = []
-        for directory in os.listdir(input_dir):
-            if directory == "images": # skip the images directory
-                continue
 
-            if os.path.isdir(os.path.join(input_dir, directory)): # only consider directories (which should be the mask prompt directories)
-                if any(substring in directory for substring in ["Track", "skipped"]):
-                    continue
-                mask_prompts.append(directory)
-        
-        return mask_prompts
+    def _get_all_mask_prompts(self, video_name: str) -> List[str]:
+        print(f"Getting all mask prompts from annotations for video: {video_name}")
+        video_associations = self.extraction_pipeline.assocs_annotations.get(video_name, {})
+
+        all_prompts = set()
+        for _, association_details in video_associations.items():
+            association_name = association_details.get("name", "")
+            if "Track" in association_name or "skipped" in association_name.lower():
+                continue
+            all_prompts.add(association_name)
+
+        return list(all_prompts)
     
     def _check_object_reconstruction_complete(self, video_name, mask_prompt):
         object_viz_dir = Path(__file__).parent / "visualization" / video_name / mask_prompt
