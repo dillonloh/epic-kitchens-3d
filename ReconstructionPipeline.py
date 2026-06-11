@@ -27,6 +27,8 @@ class HDEPIC3DReconstructionPipeline:
                 continue
 
             if os.path.isdir(os.path.join(input_dir, directory)): # only consider directories (which should be the mask prompt directories)
+                if any(substring in directory for substring in ["Track", "skipped"]):
+                    continue
                 mask_prompts.append(directory)
         
         return mask_prompts
@@ -41,9 +43,9 @@ class HDEPIC3DReconstructionPipeline:
         print(f"Using mask prompts: {mask_prompts}")
 
         for single_mask_prompt in mask_prompts:
-            # skip if the mask prompt contains the word "skipped"
-            if "skipped" in single_mask_prompt:
-                print(f"Skipping mask prompt {single_mask_prompt} for video {video_name} because it contains the word 'skipped'.")
+            # skip if the mask prompt contains the word "skipped" or "Track"
+            if "skipped" in single_mask_prompt or "Track" in single_mask_prompt:
+                print(f"Skipping mask prompt {single_mask_prompt} for video {video_name} because it contains the word 'skipped' or 'Track'.")
                 continue
 
             image_names = None

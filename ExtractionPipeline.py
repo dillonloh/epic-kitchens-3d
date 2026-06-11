@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import json
+from typing import List, Optional, Set
 
 import cv2
 import numpy as np
@@ -42,7 +43,40 @@ class HDEPICExtractionPipeline:
         with open(self.assoc_annotation_json_path, "r") as f:
             self.assocs_annotations = json.load(f)
 
-    def extract_frames(self, participant_id, video_name, output_folder, resize_to=None, dry_run=False, force_reextract=False):
+    def _get_required_frame_numbers(self, video_name: str) -> List[int]:
+        video_associations = self.assocs_annotations.get(video_name, {})
+        video_masks = self.masks_annotations.get(video_name, {})
+
+        required_frames = set()
+
+        for _, association_details in video_associations.items():
+            association_name = association_details.get("name", "")
+            if "Track" in association_name or "skipped" in association_name.lower():
+                continue
+
+            for track in association_details.get("tracks", []):
+                for mask_id in track.get("masks", []):
+                    mask_info = video_masks.get(mask_id)
+                    if not mask_info:
+                        continue
+
+                    frame_num = mask_info.get("frame_number")
+                    if frame_num is None:
+                        continue
+
+                    required_frames.add(int(frame_num))
+
+        return sorted(required_frames)
+
+    def extract_frames(
+        self,
+        participant_id,
+        video_name,
+        output_folder,
+        resize_to=None,
+        dry_run=False,
+        force_reextract=False
+    ):
         
         print(f"Extracting frames from video: {video_name}")
         
@@ -53,15 +87,21 @@ class HDEPICExtractionPipeline:
 
         if not cap.isOpened():
             raise Exception(f"Could not open video: {video_path}")
+        
+        required_frames = self._get_required_frame_numbers(video_name)
+        required_frames = sorted({int(f) for f in required_frames})
+        required_frame_set = set(required_frames)
 
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if not force_reextract and self._all_frames_extracted(output_folder, total_frames):
-            print(f"All {total_frames} frames already extracted for video: {video_name}")
+        print(f"Need to extract {len(required_frames)} annotated frames for video: {video_name}")
+
+        if not force_reextract and self._required_frames_extracted(output_folder, required_frames):
+            print(f"All required frames already extracted for video: {video_name}")
             cap.release()
             return
 
         frame_idx = 0
-        saved_idx = 0
+        saved_count = 0
+        
         with ThreadPoolExecutor(max_workers=8) as executor:
             while True:
                 ret, frame = cap.read()
@@ -69,15 +109,18 @@ class HDEPICExtractionPipeline:
                 if not ret:
                     break
 
+                if frame_idx not in required_frame_set:
+                    frame_idx += 1
+                    continue
+
                 filename = (
-                    f"{saved_idx}.png"
+                    f"{frame_idx}.png"
                 )
 
                 save_path = os.path.join(output_folder, filename)
                 # check if file already exists to avoid redundant processing
                 if os.path.exists(save_path):
                     print(f"Frame {frame_idx} already exists at {save_path}, skipping.")
-                    saved_idx += 1
                     frame_idx += 1
                     continue
 
@@ -87,9 +130,9 @@ class HDEPICExtractionPipeline:
                 if not dry_run:
                     f = frame.copy()
                     future = executor.submit(cv2.imwrite, save_path, f)
-                    future.add_done_callback(lambda fut, idx=saved_idx, sp=save_path: print(f"Saved frame {idx} to {sp}"))
+                    future.add_done_callback(lambda fut, idx=frame_idx, sp=save_path: print(f"Saved frame {idx} to {sp}"))
 
-                saved_idx += 1
+                saved_count += 1
                 frame_idx += 1
 
                 print(f"Processed frame {frame_idx}", end="\r")
@@ -97,7 +140,19 @@ class HDEPICExtractionPipeline:
         cap.release()
 
         print(f"Finished extracting frames for video: {video_name}")
-        print(f"Saved {saved_idx} frames to: {output_folder}")
+        print(f"Saved {saved_count} new frames to: {output_folder}")
+
+    def _required_frames_extracted(self, output_folder, required_frames: List[int]):
+        if not required_frames:
+            return False
+
+        missing = [frame for frame in required_frames if not os.path.exists(os.path.join(output_folder, f"{frame}.png"))]
+        if missing:
+            print(f"Missing {len(missing)} required frames in {output_folder}")
+            return False
+
+        print(f"Found all {len(required_frames)} required frames in {output_folder}")
+        return True
 
     def _all_frames_extracted(self, output_folder, total_frames):
         if total_frames <= 0:
@@ -120,6 +175,11 @@ class HDEPICExtractionPipeline:
         with ThreadPoolExecutor(max_workers=8) as executor:
             for association_id, association_details in video_associations.items():
                 association_name = association_details['name']
+                
+                if "Track" in association_name or "skipped" in association_name.lower():
+                    print(f"Skipping association {association_id} with name {association_name} as it contains 'Track' or 'skipped'.")
+                    continue
+
                 print(f"Processing association ID: {association_id}, {association_name}")
 
                 association_output_dir = os.path.join(masks_output_dir, association_name)

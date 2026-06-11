@@ -30,25 +30,13 @@ if __name__ == "__main__":
     video_name = video_name.replace(".mp4", "")
     print(f"Processing video: {video_name}")
 
-    try:
-        # check if this video has already been reconstructed by looking in the reconstruction tracking log
-        if os.path.exists(RECONSTRUCTION_TRACKING_LOG):
-            with open(RECONSTRUCTION_TRACKING_LOG, "r") as log_file:
-                reconstructed_videos = log_file.read().splitlines()
-                if video_name in reconstructed_videos:
-                    print(f"Video {video_name} already reconstructed, skipping...")
-                    exit()
-    
+    try:    
         video_output_dir = os.path.join(FRAMES_MASKS_DIR, video_name)
         video_frames_output_dir = os.path.join(video_output_dir, "images")
         video_masks_output_dir = os.path.join(video_output_dir)
         
-        pipeline = HDEPICPipeline(MASKS_ANNOTATIONS_JSON_PATH, ASSOC_ANNOTATIONS_JSON_PATH, ATTACHED_MASKS_DIR, UNATTACHED_MASKS_DIR)
+        pipeline = HDEPICPipeline(MASKS_ANNOTATIONS_JSON_PATH, ASSOC_ANNOTATIONS_JSON_PATH, ATTACHED_MASKS_DIR, UNATTACHED_MASKS_DIR, RECONSTRUCTION_TRACKING_LOG)
         pipeline.run_pipeline(participant_id, video_name, video_frames_output_dir, video_masks_output_dir, dry_run=DRY_RUN)
-
-        # log the reconstruction
-        with open(RECONSTRUCTION_TRACKING_LOG, "a") as log_file:
-            log_file.write(f"{video_name}\n")
 
     except Exception as e:
         print(f"Error processing video {video_name}: {e}")
