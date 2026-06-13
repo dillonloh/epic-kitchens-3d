@@ -1,19 +1,23 @@
 import json
 import os
+import math
 import numpy as np
+import pandas as pd
 from pathlib import Path
 
+
+import bpy
 import cv2
 from scipy.spatial.transform import Rotation
 
 
 class ScalingPipeline:
     def __init__(self, masks_annotation_json_path, 
-                 assoc_annotation_json_path, 
-                 calibration_json_path, 
+                 assoc_annotation_json_path,
                  attached_masks_dir, 
                  unattached_masks_dir, 
-                 traj_root_dir,
+                 slam_and_gaze_root_dir,
+                 videos_root_dir,
                  recon_input_root_dir=Path(__file__).parent / "visualization",
                  scaled_output_root_dir=Path(__file__).parent / "visualization_scaled"):
         
@@ -21,8 +25,8 @@ class ScalingPipeline:
         self.assoc_annotation_json_path = assoc_annotation_json_path
         self.attached_masks_dir = attached_masks_dir
         self.unattached_masks_dir = unattached_masks_dir
-        self.calibration_json_path = calibration_json_path
-        self.traj_root_dir = traj_root_dir
+        self.slam_and_gaze_root_dir = slam_and_gaze_root_dir
+        self.videos_root_dir = videos_root_dir
         self.recon_input_root_dir = recon_input_root_dir
         self.scaled_output_root_dir = scaled_output_root_dir
         
@@ -54,20 +58,20 @@ class ScalingPipeline:
         T_device_cam_q = np.array([q_dc[1][0], q_dc[1][1], q_dc[1][2], q_dc[0]])  # xyzw
         return f_rgb, cx_rgb, cy_rgb, T_device_cam_t, T_device_cam_q
 
-    def _get_mask_path(self, mask_id):
-        attached = Path(self.attached_masks_dir) / f"{mask_id}.png"
+    def _get_mask_path(self, video_name, mask_id):
+        attached = Path(self.attached_masks_dir) / video_name /f"{mask_id}.png"
         if attached.exists():
             return attached
-        unattached = Path(self.unattached_masks_dir) / f"{mask_id}.png"
+        unattached = Path(self.unattached_masks_dir) / video_name /f"{mask_id}.png"
         if unattached.exists():
             return unattached
         return None
     
-    def _get_scale_for_association(self, assoc_name, assoc_info, mask_info, video_id,
+    def _get_scale_for_association(self, assoc_name, video_id,
                                 traj, mp4_to_vrs, focal_length, T_device_cam_t, R_device_cam):
         
-        video_assocs = assoc_info.get(video_id, {})
-        video_masks  = mask_info.get(video_id, {})
+        video_assocs = self.assocs_annotations.get(video_id, {})
+        video_masks  = self.masks_annotations.get(video_id, {})
         candidates   = []
 
         for assoc_id, assoc in video_assocs.items():
@@ -88,7 +92,7 @@ class ScalingPipeline:
                         if z <= 0: # invalid depth (behind camera dont make sense)s
                             continue
                         real_size = None
-                        mask_pixel_length = self._get_mask_pixel_length(mask_id)
+                        mask_pixel_length = self._get_mask_pixel_length(video_id, mask_id)
                         real_size, _ = self._get_real_world_size(
                             assoc_3d_pos, camera_pose, mask_pixel_length, focal_length, T_device_cam_t, R_device_cam
                         )
@@ -141,18 +145,9 @@ class ScalingPipeline:
         t_cam_world = -R_cam_world @ t_wc
         return R_cam_world, t_cam_world
     
-    def _get_mask_path(self, mask_id):
-        attached = Path(self.attached_masks) / f"{mask_id}.png"
-        if attached.exists():
-            return attached
-        unattached = Path(self.unattached_masks) / f"{mask_id}.png"
-        if unattached.exists():
-            return unattached
-        return None
+    def _get_mask_pixel_length(self, video_name, mask_id):
 
-    def _get_mask_pixel_length(self, mask_id):
-
-        mask_path = self._get_mask_path(mask_id)
+        mask_path = self._get_mask_path(video_name, mask_id)
         mask_img = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
 
         # TODO: switch to finding maxferet diameter instead of bbox long, since object is not necessarily aligned with camera axes
@@ -178,5 +173,226 @@ class ScalingPipeline:
         real_size = (float(mask_pixel_length) / focal_length) * cam_to_assoc_dist # y = x * z / f  (similar triangles in pinhole camera model, where x is pixel length, y is real world length, z is depth from camera, f is focal length)
         return real_size, cam_to_assoc_dist
 
+    def _get_video_num(self, video_name):
+        participant_id = video_name.split('-')[0]
+        vrs_to_multi_slam_json_path = Path(self.slam_and_gaze_root_dir) / participant_id / "SLAM" / "multi" / "vrs_to_multi_slam.json"
+        
+        with open(vrs_to_multi_slam_json_path, "r") as f:
+            vrs_to_multi_slam = json.load(f)
+            video_num = vrs_to_multi_slam.get(f"{participant_id}/{video_name}.vrs")
+
+        return video_num
+
+    def _load_trajectory(self, traj_csv, mp4_vrs_csv):
+        traj = pd.read_csv(traj_csv)
+        traj["tracking_timestamp_ns"] = traj["tracking_timestamp_us"] * 1000
+        mp4_to_vrs = pd.read_csv(mp4_vrs_csv)
+        return traj, mp4_to_vrs
+
+    def _iter_result_glbs(self, root):
+        for obj_dir in sorted(Path(root).iterdir()):
+            if not obj_dir.is_dir():
+                continue
+            for nested in obj_dir.iterdir():
+                if not nested.is_dir():
+                    continue
+                glb = nested / "result.glb"
+                if not glb.exists():
+                    continue
+                parts = nested.name.split("_")
+                try:
+                    mv_idx = next(i for i, p in enumerate(parts) if p == "mv")
+                    assoc_name = " ".join(parts[1:mv_idx])
+                except StopIteration:
+                    assoc_name = obj_dir.name
+                yield assoc_name, str(glb)
+    
+    @staticmethod
+    def import_glb(glb_path, location, name):
+        before = set(bpy.data.objects)
+        bpy.ops.import_scene.gltf(filepath=glb_path)
+        new_objs = set(bpy.data.objects) - before
+        roots = [o for o in new_objs if o.parent is None]
+        for root in roots:
+            root.location = location
+            root.name = name
+        return new_objs
+
+    def _get_scaled_output_glb_path(self, glb_path):
+        relative_glb_path = Path(glb_path).relative_to(self.recon_input_root_dir)
+        output_glb_path = Path(self.scaled_output_root_dir) / relative_glb_path
+        output_glb_path.parent.mkdir(parents=True, exist_ok=True)
+        return output_glb_path
+
+    @staticmethod
+    def export_glb(output_path, objects):
+        bpy.ops.object.select_all(action="DESELECT")
+        for obj in objects:
+            obj.select_set(True)
+
+        # Bake current object transforms into mesh data so downstream consumers
+        # don't depend on node-level scale transforms being preserved.
+        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+
+        bpy.ops.export_scene.gltf(
+            filepath=str(output_path),
+            export_format="GLB",
+            use_selection=True,
+            export_apply=True,
+        )
+
+    @staticmethod
+    def remove_objects(objects):
+        for obj in list(objects):
+            bpy.data.objects.remove(obj, do_unlink=True)
+    
+    @staticmethod
+    def get_mesh_max_dim(objects):
+        all_verts = []
+        for obj in objects:
+            if obj.type != "MESH":
+                continue
+            for v in obj.data.vertices:
+                wco = obj.matrix_world @ v.co
+                all_verts.append([wco.x, wco.y, wco.z])
+        if not all_verts:
+            return None
+        verts = np.array(all_verts)
+        return float((verts.max(axis=0) - verts.min(axis=0)).max())
+
+    @staticmethod
+    def zero_root_locations(objects):
+        roots = [o for o in objects if o.parent is None]
+        for root in roots:
+            root.location = (0.0, 0.0, 0.0)
+
+
+    def _copy_debug_masked_images(self, video_name):
+        # copy the debug masked images from original recon input dir to the scaled output dir, so that we can visualize the masks alongside the scaled GLBs
+        video_dir = Path(self.recon_input_root_dir) / video_name
+        if not video_dir.is_dir():
+            return
+        for assoc_root_dir in video_dir.iterdir():
+            print(f"Checking association directory: {assoc_root_dir}")
+            if not assoc_root_dir.is_dir():
+                continue
+            
+            for assoc_dir in assoc_root_dir.iterdir():
+                if not assoc_dir.is_dir():
+                    continue
+                debug_masked_images_dir = assoc_dir / "debug_masked_images"
+                if not debug_masked_images_dir.exists():
+                    continue
+                output_debug_masked_images_dir = Path(self.scaled_output_root_dir) / video_dir.name / assoc_root_dir.name / assoc_dir.name / "debug_masked_images"
+                output_debug_masked_images_dir.mkdir(parents=True, exist_ok=True)
+                for img_file in debug_masked_images_dir.iterdir():
+                    print(f"Copying debug masked image: {img_file} to {output_debug_masked_images_dir}")
+                    if img_file.suffix.lower() in [".png", ".jpg", ".jpeg"]:
+                        output_img_file = output_debug_masked_images_dir / img_file.name
+                        with open(img_file, "rb") as src, open(output_img_file, "wb") as dst:
+                            dst.write(src.read())
+
     def run_pipeline(self, video_name, dry_run=False):
-        pass
+        
+        participant_id = video_name.split('-')[0]
+        video_num = self._get_video_num(video_name)
+        skipped = 0
+
+        video_traj_path = Path(self.slam_and_gaze_root_dir) / participant_id / "SLAM" / "multi" / video_num / video_num / "slam" / "closed_loop_trajectory.csv"
+        calib_jsonl_path = Path(self.slam_and_gaze_root_dir) / participant_id / "SLAM" / "multi" / video_num / video_num / "slam" / "online_calibration.jsonl"
+        mp4_to_vrs_csv_path = Path(self.videos_root_dir) / participant_id / f"{video_name}_mp4_to_vrs_time_ns.csv"
+
+        traj, mp4_to_vrs = self._load_trajectory(video_traj_path, mp4_to_vrs_csv_path)
+        
+        # fx = focal length in pixels, cx_rgb = principal point x coordinate, cy_rgb = principal point y coordinate, 
+        # T_device_cam_t = translation vector from device to camera, T_device_cam_q = quaternion rotation from device to camera
+        fx, cx_rgb, cy_rgb, T_device_cam_t, T_device_cam_q = self._load_calibration(calib_jsonl_path)
+        R_device_cam = Rotation.from_quat(T_device_cam_q).as_matrix()
+        print(f"Calibration: f={fx:.1f}  cx={cx_rgb:.1f}  cy={cy_rgb:.1f}")
+
+        reconstructed_objects_glb_list = list(self._iter_result_glbs(Path(self.recon_input_root_dir) / video_name))
+
+        for assoc_name, glb_path in reconstructed_objects_glb_list:
+            print(f"Processing association: {assoc_name}")
+       
+            real_size, metric_z, pos = self._get_scale_for_association(
+                assoc_name, video_name,
+                traj, mp4_to_vrs, fx, T_device_cam_t, R_device_cam
+            )
+
+            if pos is None:
+                print(f"[SKIP] no valid pose/depth found for '{assoc_name}'")
+                skipped += 1
+                continue
+
+            print(f"Found scale reference for '{assoc_name}': real_size={real_size:.3f}m, metric_z={metric_z:.3f}m, pos={pos}")
+
+            new_objs = self.import_glb(glb_path, tuple(pos), assoc_name)
+            bpy.context.view_layer.update()
+
+            scale_factor = None
+
+            if real_size is not None:
+                mesh_dim = self.get_mesh_max_dim(new_objs)
+                if mesh_dim and mesh_dim > 0:
+                    scale_factor = real_size / mesh_dim
+                    print(f"real_size={real_size:.3f}m  mesh_dim={mesh_dim:.4f}  scale={scale_factor:.4f}")
+                else:
+                    print(f"real_size={real_size:.3f}m  mesh_dim=BAD")
+            elif metric_z is not None:
+                all_z = []
+                for obj in new_objs:
+                    if obj.type != "MESH":
+                        continue
+                    for v in obj.data.vertices:
+                        all_z.append(abs((obj.matrix_world @ v.co).z))
+                if all_z:
+                    mvs_z = float(np.mean(all_z))
+                    scale_factor = metric_z / mvs_z if mvs_z > 0 else None
+                    if scale_factor is not None:
+                        print(f"z-fallback: metric_z={metric_z:.3f}m  mvs_z={mvs_z:.4f}  scale={scale_factor:.4f}")
+                    else:
+                        print(f"z-fallback: metric_z={metric_z:.3f}m  mvs_z={mvs_z:.4f}  scale=BAD")
+                else:
+                    print("z-fallback: no vertices")
+            else:
+                print("no metric depth")
+
+            if scale_factor is None:
+                print(f"[SKIP] no valid scale factor found for '{assoc_name}'")
+                skipped += 1
+                self.remove_objects(new_objs)
+                continue
+
+            roots = [o for o in new_objs if o.parent is None]
+            for root in roots:
+                root.scale = (scale_factor, scale_factor, scale_factor)
+
+            # Ensure exported GLBs have zeroed XYZ at object/root level.
+            self.zero_root_locations(new_objs)
+
+            output_glb_path = self._get_scaled_output_glb_path(glb_path)
+            self.export_glb(output_glb_path, new_objs)
+            print(f"Saved scaled GLB to {output_glb_path}")
+
+            self.remove_objects(new_objs)
+
+        print(f"Finished scaling for {video_name}: skipped={skipped}")
+
+        # Copy debug masked images to the scaled output directory
+        self._copy_debug_masked_images(video_name)
+        print(f"Copied debug masked images for {video_name} to scaled output directory")
+
+if __name__ == "__main__":
+    
+    # Example usage
+    pipeline = ScalingPipeline(
+        masks_annotation_json_path="/home/ghdl2/rds/hpc-work/MPhil Dissertation/data/hd-epic/hd-epic-annotations/scene-and-object-movements/mask_info.json",
+        assoc_annotation_json_path="/home/ghdl2/rds/hpc-work/MPhil Dissertation/data/hd-epic/hd-epic-annotations/scene-and-object-movements/assoc_info.json",
+        attached_masks_dir="/home/ghdl2/rds/hpc-work/MPhil Dissertation/data/hd-epic/masks/masks",
+        unattached_masks_dir="/home/ghdl2/rds/hpc-work/MPhil Dissertation/data/hd-epic/masks/unattached_masks",
+        slam_and_gaze_root_dir="/home/ghdl2/rds/hpc-work/MPhil Dissertation/data/hd-epic/HD-EPIC/SLAM-and-Gaze",
+        videos_root_dir="/home/ghdl2/rds/hpc-work/MPhil Dissertation/data/hd-epic/HD-EPIC/Videos"
+    )
+
+    pipeline.run_pipeline("P01-20240202-110250", dry_run=False)
