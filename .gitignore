@@ -223,3 +223,4 @@ extracted_frames_and_masks/
 visualization
 visualization_scaled
 *.zip
+logs/
