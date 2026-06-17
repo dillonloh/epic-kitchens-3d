@@ -210,8 +210,15 @@ class ScalingPipeline:
     @staticmethod
     def import_glb(glb_path, location, name):
         before = set(bpy.data.objects)
-        bpy.ops.import_scene.gltf(filepath=glb_path)
+        try:
+            bpy.ops.import_scene.gltf(filepath=glb_path)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to import GLB '{glb_path}': {exc}") from exc
         new_objs = set(bpy.data.objects) - before
+
+        if not new_objs:
+            raise RuntimeError(f"Import returned no objects for GLB '{glb_path}'")
+
         roots = [o for o in new_objs if o.parent is None]
         for root in roots:
             root.location = location
@@ -273,7 +280,6 @@ class ScalingPipeline:
         if not video_dir.is_dir():
             return
         for assoc_root_dir in video_dir.iterdir():
-            print(f"Checking association directory: {assoc_root_dir}")
             if not assoc_root_dir.is_dir():
                 continue
             
@@ -286,7 +292,6 @@ class ScalingPipeline:
                 output_debug_masked_images_dir = Path(self.scaled_output_root_dir) / video_dir.name / assoc_root_dir.name / assoc_dir.name / "debug_masked_images"
                 output_debug_masked_images_dir.mkdir(parents=True, exist_ok=True)
                 for img_file in debug_masked_images_dir.iterdir():
-                    print(f"Copying debug masked image: {img_file} to {output_debug_masked_images_dir}")
                     if img_file.suffix.lower() in [".png", ".jpg", ".jpeg"]:
                         output_img_file = output_debug_masked_images_dir / img_file.name
                         with open(img_file, "rb") as src, open(output_img_file, "wb") as dst:
@@ -297,6 +302,8 @@ class ScalingPipeline:
         participant_id = video_name.split('-')[0]
         video_num = self._get_video_num(video_name)
         skipped = 0
+        imported = 0
+        skip_details = []
 
         video_traj_path = Path(self.slam_and_gaze_root_dir) / participant_id / "SLAM" / "multi" / video_num / video_num / "slam" / "closed_loop_trajectory.csv"
         calib_jsonl_path = Path(self.slam_and_gaze_root_dir) / participant_id / "SLAM" / "multi" / video_num / video_num / "slam" / "online_calibration.jsonl"
@@ -311,6 +318,7 @@ class ScalingPipeline:
         print(f"Calibration: f={fx:.1f}  cx={cx_rgb:.1f}  cy={cy_rgb:.1f}")
 
         reconstructed_objects_glb_list = list(self._iter_result_glbs(Path(self.recon_input_root_dir) / video_name))
+        total_candidates = len(reconstructed_objects_glb_list)
 
         for assoc_name, glb_path in reconstructed_objects_glb_list:
             print(f"Processing association: {assoc_name}")
@@ -323,11 +331,27 @@ class ScalingPipeline:
             if pos is None:
                 print(f"[SKIP] no valid pose/depth found for '{assoc_name}'")
                 skipped += 1
+                skip_details.append({
+                    "association": assoc_name,
+                    "glb_path": glb_path,
+                    "reason": "no_valid_pose_or_depth",
+                })
                 continue
 
             print(f"Found scale reference for '{assoc_name}': real_size={real_size:.3f}m, metric_z={metric_z:.3f}m, pos={pos}")
 
-            new_objs = self.import_glb(glb_path, tuple(pos), assoc_name)
+            try:
+                new_objs = self.import_glb(glb_path, tuple(pos), assoc_name)
+            except Exception as exc:
+                print(f"[SKIP] failed to import '{assoc_name}' from {glb_path}: {exc}")
+                skipped += 1
+                skip_details.append({
+                    "association": assoc_name,
+                    "glb_path": glb_path,
+                    "reason": "glb_import_failed",
+                    "error": str(exc),
+                })
+                continue
             bpy.context.view_layer.update()
 
             scale_factor = None
@@ -361,6 +385,11 @@ class ScalingPipeline:
             if scale_factor is None:
                 print(f"[SKIP] no valid scale factor found for '{assoc_name}'")
                 skipped += 1
+                skip_details.append({
+                    "association": assoc_name,
+                    "glb_path": glb_path,
+                    "reason": "no_valid_scale_factor",
+                })
                 self.remove_objects(new_objs)
                 continue
 
@@ -374,6 +403,7 @@ class ScalingPipeline:
             output_glb_path = self._get_scaled_output_glb_path(glb_path)
             self.export_glb(output_glb_path, new_objs)
             print(f"Saved scaled GLB to {output_glb_path}")
+            imported += 1
 
             self.remove_objects(new_objs)
 
@@ -382,6 +412,14 @@ class ScalingPipeline:
         # Copy debug masked images to the scaled output directory
         self._copy_debug_masked_images(video_name)
         print(f"Copied debug masked images for {video_name} to scaled output directory")
+
+        return {
+            "video_name": video_name,
+            "total_candidates": total_candidates,
+            "imported": imported,
+            "skipped": skipped,
+            "skip_details": skip_details,
+        }
 
 if __name__ == "__main__":
     
